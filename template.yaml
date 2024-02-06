@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: EKS Add-on Update Checker 
+Resources:
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: EKSAddonUpdateCheckerRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: EKSAddonUpdateCheckerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'eks:UpdateAddon'
+                  - 'eks:ListAddons'
+                  - 'eks:DescribeAddon'
+                  - 'eks:DescribeAddonVersions'
+                Resource: '*'
+  EKSAddonUpdateCheckerLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: EKSAddonUpdateCheckerLambda
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import urllib3
+          import json
+          import os
+          
+          http = urllib3.PoolManager()
+          
+          def lambda_handler(event, context):
+              # Get cluster_version, cluster_name, channel, username, and url from environment variables
+              cluster_version = os.environ['CLUSTER_VERSION']
+              cluster_name = os.environ['CLUSTER_NAME']
+              channel = os.environ['SLACK_CHANNEL']
+              username = os.environ['SLACK_USERNAME']
+              url = os.environ['SLACK_WEBHOOK_URL']
+              
+              # Create an AWS EKS client
+              eks_client = boto3.client('eks')
+          
+              try:
+                  # List all add-ons
+                  response = eks_client.list_addons(clusterName=cluster_name)
+                  addons = response['addons']
+                  
+                  slack_message = ""
+                  updates_available = False
+          
+                  for addon in addons:
+                      addon_response = eks_client.describe_addon(clusterName=cluster_name, addonName=addon)
+                      # Get the current version that's installed
+                      current_addon_version = addon_response['addon']['addonVersion']
+          
+                      # Describe add-on versions
+                      all_addon_versions_response = eks_client.describe_addon_versions(
+                          kubernetesVersion=cluster_version,
+                          addonName=addon
+                      )
+          
+                      addon_versions = all_addon_versions_response['addons'][0]['addonVersions']
+          
+                      # Find the latest version
+                      latest_version = addon_versions[0]['addonVersion']
+          
+                      addon_message = f"Add-on Name: {addon} | Current version: {current_addon_version} | Latest Version: {latest_version}\n"
+          
+                      update_available = current_addon_version != latest_version
+          
+                      if update_available:
+                          slack_message += addon_message
+                          slack_message += f"Update available for {addon}\n\n"
+                          updates_available = True
+                      else:
+                          print(f"{addon} is up to date!\n")
+                  if updates_available:
+                      send_message_to_slack(slack_message, channel, username, url)
+          
+              except Exception as e:
+                  slack_message += f"Error describing add-on versions: {e}"
+          
+          def send_message_to_slack(slack_message, channel, username, url):    
+              msg = {
+                  "channel": channel,
+                  "username": username,
+                  "text": slack_message,
+                  "icon_emoji": "",
+              }
+          
+              encoded_msg = json.dumps(msg).encode("utf-8")
+              resp = http.request("POST", url, body=encoded_msg)
+              print(
+                  {
+                      "message": slack_message,
+                      "status_code": resp.status,
+                      "response": resp.data,
+                  }
+              )
+          
+          # Uncomment the following line to test the Lambda function locally
+          # lambda_handler(None, None)
+      Runtime: python3.12
+      Timeout: 90
+  EKSAddonUpdateCheckerEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: EKSAddonUpdateCheckerEventRule
+      Description: Schedule for EKS Add-on Update Checker Lambda
+      ScheduleExpression: cron(00 15 ? * MON-FRI *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EKSAddonUpdateCheckerLambda.Arn
+          Id: TargetId
+  LambdaPermissionForEvent:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt EKSAddonUpdateCheckerLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EKSAddonUpdateCheckerEventRule.Arn
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt EKSAddonUpdateCheckerLambda.Arn
+  EventRuleArn:
+    Description: ARN of the CloudWatch Events rule
+    Value: !GetAtt EKSAddonUpdateCheckerEventRule.Arn
