@@ -2,8 +2,9 @@
 A tool that checks your AWS EKS cluster's add-ons for updates and sends a report to Slack if any updates are found.
 
 In Lambda > ThisFunction > Configuration > Environment variables
-add the correct values for those env vars
-you can also complete this step by putting the values directly into the cloudformation template
+
+Add the correct values for those env vars.
+You can also complete this step by putting the values directly into the cloudformation template.
 
 To create a webhook URL in Slack, follow these steps:
 1. Click on the upper left corner > Go > Workflow Builder
